@@ -1,0 +1,201 @@
+}
+
+async function doLogin(role){
+  const msg=document.getElementById("loginMsg");
+  try{
+    const contact=loginEmail.value.trim();
+    const body={password:loginPassword.value,userId:loginId.value,role};
+    if(validEmail(contact))body.email=contact; else if(/^\+[1-9]\d{7,14}$/.test(contact))body.phone=contact; else throw new Error("Enter a valid email address or international phone number.");
+    const d=await api("/api/login",{method:"POST",body:JSON.stringify(body)});
+    if(d.requiresTwoFactor){ state.pending2fa={challengeId:d.challengeId,user:d.user,role}; twoFactorPage(); return; }
+    state.loggedIn=true;state.user=d.user;state.page="dashboard";d.user.role==='admin'?adminConsole():dashboard();toast(`Welcome, ${d.user.name}`);
+  }catch(e){toast(e.message,'danger');}
+}
+function interviewerLogout(){state.loggedIn=false;state.user=null;state.page="login";interviewerLogin();}
+
+
+async function dashboard(){
+  clearInterval(state.liveClockTimer);
+  state.page="dashboard";
+  let sessionsData=[];try{const d=await api('/api/sessions');sessionsData=d.sessions||[];}catch(e){}
+  state.dashboardSessions=sessionsData;
+  const active=sessionsData.filter(s=>['Interview In Progress','Ready','Warning Issued'].includes(s.status)).length;
+  const ended=sessionsData.filter(s=>s.endedAt||['Completed','Passed','Failed','Rejected','Terminated'].includes(s.status)).length;
+  shell(`<div class="page-title"><div><div class="eyebrow">INTERVIEW OPERATIONS</div><h1>Interview Verification Dashboard</h1><div class="muted">Monitor interview integrity, candidate outcomes and verification activity.</div></div><div class="dashboard-search"><span>⌕</span><input id="dashboardSearch" placeholder="Search candidates, username, email, phone or session…" oninput="filterDashboardSessions()"></div><div id="dashboardPeopleResults" class="dashboard-people-results" style="display:none"></div></div>
+  <section class="panel project-overview"><div><div class="eyebrow">ABOUT HIRETRUST</div><h2>AI-assisted interview verification</h2><p>HireTrust combines candidate identity verification, room checks, audio monitoring, camera presence, full-screen controls, interview scheduling and audit trails in one workspace. AI features are advisory and keep the final interview decision with the interviewer.</p></div><div class="overview-points"><span>Identity</span><span>Audio</span><span>Room</span><span>Device</span><span>AI Insights</span></div></section>
+  <div class="cards"><div class="card"><div class="label">Active Interviews</div><div class="metric">${active}</div></div><div class="card"><div class="label">Completed / Ended</div><div class="metric">${ended}</div></div><div class="card live-summary-card warning-summary"><div class="label">Warnings</div><div class="metric">${sessionsData.reduce((n,x)=>n+Number(x.warnings||0),0)}</div></div><div class="card"><div class="label">Passed</div><div class="metric">${sessionsData.filter(s=>s.decision==='Passed').length}</div></div><div class="card"><div class="label">Needs Review</div><div class="metric">${sessionsData.filter(s=>s.decision==='Review'||s.status==='Completed'&&!s.decision).length}</div></div></div>
+  ${aiAssistant()}
+  <section class="panel"><div class="section-head"><div><h2>Candidate Interview History</h2><span class="muted">Use the Schedule page to create and notify candidates about interviews.</span></div></div><div style="overflow:auto"><table class="table professional-table"><thead><tr><th>Candidate</th><th>Username</th><th>Email</th><th>Phone</th><th>Session</th><th>Started</th><th>Ended</th><th>Status</th><th>Result</th><th>Action</th></tr></thead><tbody id="dashboardSessionRows">${renderDashboardRows(sessionsData)}</tbody></table></div></section>`);
+}
+function renderDashboardRows(sessionsData){
+  return sessionsData.length?sessionsData.slice().reverse().map(s=>`<tr data-search="${esc(`${s.candidateName||''} ${s.candidateId||''} ${s.candidateEmail||''} ${s.candidatePhone||''} ${s.id||''}`).toLowerCase()}"><td>${esc(s.candidateName||'—')}</td><td>${esc(s.candidateId||'—')}</td><td>${esc(s.candidateEmail||'—')}</td><td>${esc(s.candidatePhone||'—')}</td><td>${esc(s.id)}</td><td>${s.startedAt?formatAppDate(s.startedAt):'—'}</td><td>${s.endedAt?formatAppDate(s.endedAt):'—'}</td><td><span class="badge ${['Completed','Passed'].includes(s.status)?'ready':(['Failed','Rejected','Terminated'].includes(s.status)?'rejected':s.status==='Warning Issued'?'warning':'pending')}">${esc(s.status||'Unknown')}</span></td><td><span class="badge ${s.decision==='Passed'?'ready':s.decision==='Failed'||s.decision==='Rejected'?'rejected':s.decision?'warning':'pending'}">${esc(s.decision||'Pending')}</span></td><td><button class="btn secondary" onclick="viewSession('${esc(String(s.candidateName||'').replace(/'/g,"\\'"))}')">Monitor</button></td></tr>`).join(''):'<tr><td colspan="10" class="muted">No candidate sessions have been recorded yet.</td></tr>';
+}
+let dashboardSearchTimer=null;
+function showCandidateDetails(session){
+  const s=session||{};
+  const verification=s.faceMatchStatus||'Pending';
+  const status=s.status||'Not Started';
+  const result=s.decision||'Pending';
+  const badge=(value,kind)=>`<span class="badge ${kind}">${esc(value)}</span>`;
+  const statusKind=['Failed','Rejected','Terminated'].includes(status)?'rejected':status==='Warning Issued'?'warning':'ready';
+  const resultKind=result==='Passed'?'ready':['Failed','Rejected'].includes(result)?'rejected':result==='Pending'?'pending':'warning';
+  const verifyKind=verification==='Verified'?'ready':'pending';
+  const details=`<div class="candidate-detail-overlay" id="candidateDetailOverlay" role="dialog" aria-modal="true" aria-label="Candidate details">
+    <div class="candidate-detail-modal">
+      <div class="candidate-detail-head"><div class="person-cell"><div class="mini-avatar large">${esc((s.candidateName||'C')[0].toUpperCase())}</div><div><div class="eyebrow">CANDIDATE PROFILE</div><h2>${esc(s.candidateName||'Candidate')}</h2><div class="muted">${esc(s.candidateId||'No username')}</div></div></div><button class="icon-btn" type="button" aria-label="Close" onclick="closeCandidateDetails()">×</button></div>
+      <div class="candidate-detail-grid">
+        <section class="detail-card"><div class="detail-label">Contact</div><div class="detail-value">${esc(s.candidateEmail||'—')}</div><div class="detail-value">${esc(s.candidatePhone||'—')}</div></section>
+        <section class="detail-card"><div class="detail-label">Interview status</div><div class="detail-statuses">${badge(status,statusKind)} ${badge(result,resultKind)}</div><div class="detail-meta">Session ${esc(s.id||'—')}</div></section>
+        <section class="detail-card"><div class="detail-label">Verification</div><div class="detail-statuses">${badge(verification,verifyKind)}</div><div class="detail-meta">Face match: ${esc(s.faceMatchScore!=null?String(s.faceMatchScore):'—')}</div></section>
+        <section class="detail-card"><div class="detail-label">Activity</div><div class="detail-value">Warnings: ${esc(String(s.warnings||0))}</div><div class="detail-meta">Updated ${s.updatedAt?esc(formatAppDate(s.updatedAt)):'—'}</div></section>
+      </div>
+      <div class="candidate-detail-timeline"><div class="detail-label">Interview timeline</div><div class="timeline-row"><span>Started</span><b>${s.startedAt?esc(formatAppDate(s.startedAt)):'Not started'}</b></div><div class="timeline-row"><span>Ended</span><b>${s.endedAt?esc(formatAppDate(s.endedAt)):'—'}</b></div>${s.reason?`<div class="timeline-row"><span>Notes</span><b>${esc(s.reason)}</b></div>`:''}</div>
+      <div class="candidate-detail-actions"><button class="btn secondary" type="button" onclick="closeCandidateDetails()">Close</button><button class="btn primary" type="button" onclick="closeCandidateDetails();viewSession('${String(s.candidateName||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'")}')">Open interview</button></div>
+    </div></div>`;
+  const existing=document.getElementById('candidateDetailOverlay');if(existing)existing.remove();
+  document.body.insertAdjacentHTML('beforeend',details);
+  document.body.classList.add('modal-open');
+  const overlay=document.getElementById('candidateDetailOverlay');
+  overlay.addEventListener('click',e=>{if(e.target===overlay)closeCandidateDetails();});
+  document.addEventListener('keydown',candidateDetailEsc);
+}
+function candidateDetailEsc(e){if(e.key==='Escape')closeCandidateDetails();}
+function closeCandidateDetails(){const el=document.getElementById('candidateDetailOverlay');if(el)el.remove();document.body.classList.remove('modal-open');document.removeEventListener('keydown',candidateDetailEsc);}
+
+function filterDashboardSessions(){
+  const input=document.getElementById('dashboardSearch');
+  const box=document.getElementById('dashboardPeopleResults');
+  const q=(input?.value||'').trim().toLowerCase();
+  document.querySelectorAll('#dashboardSessionRows tr[data-search]').forEach(r=>{
+    const match=!q || String(r.dataset.search||'').includes(q);
+    r.style.display=match?'':'none';
+  });
+  if(!box)return;
+  clearTimeout(dashboardSearchTimer);
+  if(!q){box.innerHTML='';box.style.display='none';return;}
+
+  // Build suggestions from the already-loaded dashboard data first, so search works even if the server/API is unavailable.
+  const sessions=(state.dashboardSessions||[]).filter(s=>[s.candidateName,s.candidateId,s.candidateEmail,s.candidatePhone,s.interviewerName,s.id,s.status,s.decision]
+    .some(v=>String(v||'').toLowerCase().includes(q))).slice().reverse();
+  let html='';
+  if(sessions.length){
+    html+='<div class="search-result-title">Matching candidates</div>'+sessions.slice(0,8).map(s=>'<button class="search-result session-search-result" type="button" data-session-id="'+esc(s.id||'')+'"><span class="mini-avatar">'+esc((s.candidateName||'C')[0].toUpperCase())+'</span><span><b>'+esc(s.candidateName||'Candidate')+'</b><small>'+esc(s.candidateId||'')+' · '+esc(s.candidateEmail||'')+'</small></span><span class="search-result-arrow">›</span></button>').join('');
+  }
+  box.innerHTML=html||'<div class="muted search-empty">No matching candidates or sessions.</div>';
+  box.querySelectorAll('[data-session-id]').forEach(btn=>btn.addEventListener('click',()=>{const session=(state.dashboardSessions||[]).find(s=>String(s.id)===String(btn.dataset.sessionId));if(session)showCandidateDetails(session);box.style.display='none';}));
+  box.style.display='block';
+}
+
+async function scheduleInterview(){
+  const msg=document.getElementById('scheduleMsg');
+  const candidateEmail=document.getElementById('scheduleCandidateEmail').value.trim();
+  const interviewerEmail=document.getElementById('scheduleInterviewerEmail').value.trim();
+  const scheduledAt=document.getElementById('scheduleAt').value;
+  if(!validEmail(candidateEmail)||!validEmail(interviewerEmail)){toast('Enter valid candidate and interviewer email addresses.','warning');return;}
+  if(!scheduledAt){toast('Choose the interview date and time.','warning');return;}
+  try{const localDate=new Date(scheduledAt); if(Number.isNaN(localDate.getTime())){toast('Choose a valid interview date and time.','warning');return;} const scheduledAtIso=localDate.toISOString(); const d=await api('/api/schedule',{method:'POST',body:JSON.stringify({candidateName:document.getElementById('scheduleCandidateName').value,candidateEmail,candidatePhone:document.getElementById('scheduleCandidatePhone')?.value||'',candidateId:document.getElementById('scheduleCandidateId').value,interviewerName:state.user?.name||'',interviewerEmail,interviewerPhone:document.getElementById('scheduleInterviewerPhone')?.value||'',interviewerId:document.getElementById('scheduleInterviewerId').value,scheduledAt:scheduledAtIso})});toast(d.emailNotice?.candidate?.sent&&d.emailNotice?.interviewer?.sent?'Interview scheduled. Email notifications were sent to the candidate and interviewer.':`Interview saved, but email notification could not be sent (${d.emailNotice?.candidate?.reason||'check SMTP settings'}).`,d.emailNotice?.candidate?.sent&&d.emailNotice?.interviewer?.sent?'success':'warning'); }catch(e){toast(e.message,'danger');}
+}
+
+async function candidates(){
+  state.page="candidates";
+  let sessionsData=[];
+  try{const d=await api('/api/sessions');sessionsData=d.sessions||[];}catch(e){}
+  const latest={};
+  sessionsData.forEach(s=>{if(s.candidateId && (!latest[s.candidateId] || new Date(s.updatedAt||0)>new Date(latest[s.candidateId].updatedAt||0)))latest[s.candidateId]=s;});
+  const rows=Object.values(latest);
+  shell(`<div class="page-title"><div><div class="eyebrow">PEOPLE</div><h1>Candidates</h1><div class="muted">Candidate identity, contact information, verification readiness and latest interview status.</div></div><button class="btn secondary" onclick="navigate('schedule')">View Schedule</button></div>
+  <section class="panel glass-panel"><div class="section-head"><div><h2>Candidate Directory</h2><span class="muted">Phone numbers are shown in their own column.</span></div><span class="count-chip">${rows.length} records</span></div>
+  <div class="table-wrap"><table class="table professional-table"><thead><tr><th>Candidate</th><th>Username</th><th>Email</th><th>Phone</th><th>Verification</th><th>Status</th><th>Result</th></tr></thead><tbody>
+  ${rows.length?rows.map(s=>`<tr><td><div class="person-cell"><div class="mini-avatar">${esc((s.candidateName||'C')[0].toUpperCase())}</div><div><b>${esc(s.candidateName||'—')}</b><div class="muted">${esc(s.candidateId||'—')}</div></div></div></td><td>${esc(s.candidateId||'—')}</td><td>${esc(s.candidateEmail||'—')}</td><td>${esc(s.candidatePhone||'—')}</td><td><span class="badge ${s.faceMatchStatus==='Verified'?'ready':'pending'}">${esc(s.faceMatchStatus||'Pending')}</span></td><td><span class="badge ${['Failed','Rejected','Terminated'].includes(s.status)?'rejected':s.status==='Warning Issued'?'warning':'ready'}">${esc(s.status||'Not Started')}</span></td><td><span class="badge ${s.decision==='Passed'?'ready':s.decision==='Failed'?'rejected':s.decision?'warning':'pending'}">${esc(s.decision||'Pending')}</span></td></tr>`).join(''):'<tr><td colspan="7" class="muted">No candidate sessions have been recorded yet.</td></tr>'}
+  </tbody></table></div></section>`);
+}
+function sessions(){state.page="sessions";shell(`<div class="page-title"><div><h1>Interview Sessions</h1><div class="muted">Session lifecycle and verification state.</div></div></div><div class="cards"><div class="card"><div class="label">Not Started</div><div class="metric">4</div></div><div class="card"><div class="label">Identity Verification</div><div class="metric">2</div></div><div class="card"><div class="label">In Progress</div><div class="metric">12</div></div><div class="card"><div class="label">Completed</div><div class="metric">41</div></div></div><section class="panel"><h2>Status Pipeline</h2><div class="steps"><span class="step">Not Started</span><span class="step done">Identity Verification</span><span class="step done">Room Verification</span><span class="step active">Device Verification</span><span class="step">Ready</span><span class="step">Interview In Progress</span><span class="step">Warning Issued</span><span class="step">Terminated</span><span class="step">Rejected</span><span class="step">Completed</span></div></section>`);}
+function audit(){state.page="audit";shell(`<div class="page-title"><div><h1>Audit Logs</h1><div class="muted">Timestamped security and verification events.</div></div></div><section class="panel"><table class="table"><thead><tr><th>Time</th><th>Candidate</th><th>Event</th><th>Severity</th></tr></thead><tbody>${["19:31:42|Sana Ahmed|Tab/window focus lost|Warning","19:27:13|Rahul Kumar|Full-screen mode exited|Warning","19:12:05|Sana Ahmed|Additional speaker detected|Critical","18:59:44|Arjun Rao|Government ID face match passed|Info","18:55:02|Rahul Kumar|Display configuration checked|Info"].map(x=>{let[a,b,c,d]=x.split("|");return `<tr><td>${a}</td><td>${b}</td><td>${c}</td><td><span class="badge ${d==="Critical"?"rejected":d==="Warning"?"warning":"ready"}">${d}</span></td></tr>`}).join("")}</tbody></table></section>`);}
+async function feedbackPage(){
+  state.page='feedback';
+  let sessions=[];try{const d=await api('/api/sessions?userId='+encodeURIComponent(state.user?.id||'')+'&role=interviewer');sessions=d.sessions||[];}catch(e){}
+  const withFeedback=sessions.filter(s=>s.feedback);
+  const cards=withFeedback.length?withFeedback.slice().reverse().map(s=>`<article class="feedback-card"><div class="feedback-card-head"><div><b>${esc(s.candidateName||'Candidate')}</b><div class="muted">${esc(s.candidateId||'')} • ${esc(s.candidatePhone||'—')}</div></div><span class="badge ready">${Number(s.feedback.rating||0)}/5</span></div><div class="feedback-stars-static">${'★'.repeat(Number(s.feedback.rating||0))}${'☆'.repeat(5-Number(s.feedback.rating||0))}</div><p>${esc(s.feedback.comment||'No written comment.')}</p><div class="muted">Submitted ${s.feedback.createdAt?formatAppDate(s.feedback.createdAt):'—'} • Session ${esc(s.id)}</div></article>`).join(''):`<article class="panel empty-state"><h2>No feedback yet</h2><p class="muted">When a candidate finishes an interview and submits feedback, it will appear here.</p></article>`;
+  shell(`<div class="page-title"><div><div class="eyebrow">CANDIDATE EXPERIENCE</div><h1>Candidate Feedback</h1><div class="muted">Feedback submitted after completed interviews, visible only to the interviewer.</div></div><span class="count-chip">${withFeedback.length} responses</span></div><section class="panel"><div class="feedback-summary"><div><span class="label">Responses</span><strong>${withFeedback.length}</strong></div><div><span class="label">Average rating</span><strong>${withFeedback.length?(withFeedback.reduce((n,s)=>n+Number(s.feedback.rating||0),0)/withFeedback.length).toFixed(1):'—'} / 5</strong></div></div></section><section class="feedback-grid">${cards}</section>`);
+}
+function settings(){
+  state.page="settings";
+  shell(`<div class="page-title"><div><h1>Settings</h1><div class="muted">Configure interview security and server email notifications.</div></div></div>
+  <section class="panel"><h2>Email Settings</h2>
+    <div class="helper-note"><b>Important:</b> the candidate's email address is entered on the Schedule page. These settings are the <b>sender email account</b> HireTrust uses to send messages. For Gmail, use your real Gmail address + a <b>Google App Password</b> (not your normal Gmail password). Placeholder values such as <code>YOUR_GMAIL@gmail.com</code> will not work.</div>
+    <div class="smtp-guide"><b>Gmail setup:</b> turn on 2-Step Verification in your Google Account → create an <b>App Password</b> named “HireTrust” → copy the generated 16-character password into <b>SMTP Password / App Password</b>. Keep Host <b>smtp.gmail.com</b>, Port <b>465</b>, and secure TLS enabled. Use the same real Gmail address for SMTP Username and From Email.</div>
+    <div id="smtpStatus" class="notice" style="margin-top:12px">Loading email configuration…</div>
+    <div class="check-grid" style="margin-top:14px">
+      <div>
+        <div class="field"><label>SMTP Host</label><input id="smtpHost" placeholder="smtp.gmail.com"></div>
+        <div class="field"><label>SMTP Port</label><input id="smtpPort" type="number" min="1" max="65535" value="465"></div>
+        <div class="field"><label>SMTP Username</label><input id="smtpUser" type="email" placeholder="your-email@gmail.com"></div>
+      </div>
+      <div>
+        <div class="field"><label>SMTP Password / App Password</label>${passwordInput('smtpPass','16-character Google App Password','new-password')}</div>
+        <div class="field"><label>From Email</label><input id="smtpFrom" type="email" placeholder="your-email@gmail.com"></div>
+        <label class="status-row" style="margin-top:18px"><span>Use secure TLS (recommended)</span><input id="smtpSecure" type="checkbox" checked></label>
+      </div>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px">
+      <button class="btn primary" onclick="saveEmailSettings()">Save Email Settings</button>
+      <button class="btn secondary" onclick="testEmailSettings()">Send Test Email</button><button class="btn ghost" onclick="checkEmailDiagnostics()">Check Configuration</button>
+    </div>
+    <div id="smtpActionMsg" class="notice" style="display:none;margin-top:12px"></div>
+  </section>
+  <section class="panel"><h2>Interview Policy</h2>${[["Require government ID verification",true],["Require room verification",true],["Require single display",true],["Require full-screen mode",true],["Detect tab/window changes",true],["Enable speaker verification with consent",true],["Auto-terminate after second focus violation",true],["Store raw audio indefinitely",false]].map(([x,v])=>`<div class="status-row"><span>${x}</span><input type="checkbox" ${v?"checked":""}></div>`).join("")}</section>
+  <section class="panel"><h2>Privacy</h2><div class="helper-note">Store only the minimum identity information necessary. Encrypt sensitive data in transit and at rest, restrict access by role, and define a deletion/retention schedule before production use.</div></section>`);
+  loadEmailSettings();
+}
+async function loadEmailSettings(){
+  try{
+    const d=await api('/api/email-settings'); const x=d.settings||{};
+    document.getElementById('smtpHost').value=x.host||'';
+    document.getElementById('smtpPort').value=x.port||587;
+    document.getElementById('smtpUser').value=x.user||'';
+    document.getElementById('smtpFrom').value=x.from||'';
+    document.getElementById('smtpSecure').checked=!!x.secure;
+    const st=document.getElementById('smtpStatus');
+    st.className=`notice ${x.passConfigured?'success-notice':'invalid-notice'}`;
+    st.textContent=x.passConfigured?'SMTP credentials are configured. You can send a test email below.':'SMTP is not configured yet. Enter the SMTP credentials and save them.';
+  }catch(e){const st=document.getElementById('smtpStatus');if(st)st.textContent='Could not load email settings.';}
+}
+async function checkEmailDiagnostics(){
+  const msg=document.getElementById('smtpActionMsg');
+  try{
+    const host=document.getElementById('smtpHost')?.value.trim()||'';
+    const port=Number(document.getElementById('smtpPort')?.value||465);
+    const user=document.getElementById('smtpUser')?.value.trim()||'';
+    const pass=document.getElementById('smtpPass')?.value||'';
+    const from=document.getElementById('smtpFrom')?.value.trim()||'';
+    const secure=!!document.getElementById('smtpSecure')?.checked;
+    if(!host||!user||!from){msg.style.display='block';msg.className='notice invalid-notice';msg.textContent='Enter SMTP host, username and From email first.';return;}
+    if(!validEmail(user)||!validEmail(from)){msg.style.display='block';msg.className='notice invalid-notice';msg.textContent='Enter a valid Gmail/email address for SMTP Username and From Email.';return;}
+    if(/YOUR_GMAIL|YOUR_EMAIL|example\.com/i.test(user)||/YOUR_GMAIL|YOUR_EMAIL|example\.com/i.test(from)){msg.style.display='block';msg.className='notice invalid-notice';msg.textContent='Replace the placeholder Gmail address with your real Gmail address.';return;}
+    if(!Number.isInteger(port)||port<1||port>65535){msg.style.display='block';msg.className='notice invalid-notice';msg.textContent='SMTP port must be between 1 and 65535.';return;}
+    // Check the values currently visible in the form. Saving here prevents a stale
+    // smtp-settings.json (for example, an old YOUR_GMAIL placeholder) from being
+    // reported as the active configuration after the user has entered new values.
+    await api('/api/email-settings',{method:'POST',body:JSON.stringify({host,port,user,pass,from,secure})});
+    const d=await api('/api/email-settings/diagnostics');
+    const x=d.diagnostics||{}; const missing=[];
+    if(!x.nodemailerInstalled)missing.push('Nodemailer');
+    if(!x.hostConfigured)missing.push('SMTP host');
+    if(!x.userConfigured)missing.push('SMTP username');
+    if(!x.passwordConfigured)missing.push('SMTP password/app password');
+    if(!x.fromConfigured)missing.push('From email');
+    if(x.placeholderCredentials)missing.push('real Gmail address (replace YOUR_GMAIL placeholder)');
+    msg.style.display='block';
+    msg.className=missing.length?'notice invalid-notice':'notice success-notice';
+    msg.textContent=missing.length?'Fix before testing: '+missing.join(', ')+'.':'Configuration looks complete. Now click Send Test Email to verify the Gmail connection.';
+    if(document.getElementById('smtpPass')) document.getElementById('smtpPass').value='';
+  }catch(e){msg.style.display='block';msg.className='notice invalid-notice';msg.textContent=e.message;}
+}
+async function saveEmailSettings(){
+  const msg=document.getElementById('smtpActionMsg');
+  const host=document.getElementById('smtpHost').value.trim(), port=Number(document.getElementById('smtpPort').value||587), user=document.getElementById('smtpUser').value.trim(), pass=document.getElementById('smtpPass').value, from=document.getElementById('smtpFrom').value.trim(), secure=document.getElementById('smtpSecure').checked;
+  if(!host||!user||!from){msg.style.display='block';msg.className='notice invalid-notice';msg.textContent='SMTP host, username and From email are required.';return;}
+  if(/YOUR_GMAIL|YOUR_EMAIL|example\.com/i.test(user)||/YOUR_GMAIL|YOUR_EMAIL|example\.com/i.test(from)){msg.style.display='block';msg.className='notice invalid-notice';msg.textContent='Replace the placeholder Gmail address with your real Gmail address.';return;}
+  if(!validEmail(user)){msg.style.display='block';msg.className='notice invalid-notice';msg.textContent='SMTP Username must be a valid email address.';return;}
+  if(!validEmail(from)){msg.style.display='block';msg.className='notice invalid-notice';msg.textContent='From email must be a valid email address.';return;}
+  if(!Number.isInteger(port)||port<1||port>65535){msg.style.display='block';msg.className='notice invalid-notice';msg.textContent='SMTP port must be between 1 and 65535.';return;}

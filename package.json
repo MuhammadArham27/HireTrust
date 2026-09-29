@@ -1,0 +1,16 @@
+{
+  "name": "hiretrust-interview-verification",
+  "version": "21.1.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "mongodb": "^6.18.0",
+    "nodemailer": "^10.0.12"
+  }
+}

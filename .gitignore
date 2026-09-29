@@ -1,0 +1,7 @@
+node_modules/
+.env
+smtp-settings.json
+.smtp-settings-key
+database.json
+*.log
+note 
